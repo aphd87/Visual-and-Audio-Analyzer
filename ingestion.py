@@ -118,27 +118,66 @@ def download_url(
         elif d.get("status") == "finished":
             progress_callback("✅ Download complete — processing file...")
 
-    ydl_opts = {
+    # Always request audio-only — Whisper only needs audio, and this avoids
+    # ffmpeg merge requirements entirely. Format priority:
+    #   1. best single-file format that contains audio (m4a → webm → best available)
+    # No postprocessors = no ffmpeg dependency.
+    _FORMAT = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[acodec!=none]/best"
+
+    BASE_OPTS = {
         "outtmpl": output_template,
         "progress_hooks": [_hook],
         "quiet": True,
         "no_warnings": True,
+        "format": _FORMAT,
+        # Mimic a real browser to avoid 403s
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
     }
 
-    # Always request audio-only — Whisper only needs audio, and this avoids
-    # ffmpeg merge requirements entirely. Format priority:
-    #   1. best single-file format that contains audio (mp4, webm, m4a, etc.)
-    #   2. best audio-only stream
-    # No postprocessors = no ffmpeg dependency.
-    ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[ext=webm]/bestaudio/best[acodec!=none]/best"
     result["is_audio_only"] = True
+
+    # Attempt order:
+    #  1. cookiesfrombrowser=chrome  (works when Chrome is installed + logged in)
+    #  2. cookiesfrombrowser=firefox
+    #  3. No cookies (works for most non-age-gated public content)
+    _attempts = [
+        {**BASE_OPTS, "cookiesfrombrowser": ("chrome",)},
+        {**BASE_OPTS, "cookiesfrombrowser": ("firefox",)},
+        BASE_OPTS,
+    ]
 
     try:
         if progress_callback:
             progress_callback("🔍 Fetching content info...")
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        info = None
+        last_err = None
+        for attempt_opts in _attempts:
+            try:
+                with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                ydl_opts = attempt_opts  # keep reference for later
+                break
+            except yt_dlp.utils.DownloadError as e:
+                last_err = e
+                err_str = str(e)
+                # Only retry on 403/auth errors; bail immediately on others
+                if "403" in err_str or "Forbidden" in err_str or "Sign in" in err_str:
+                    continue
+                raise  # non-auth error — don't retry
+
+        if info is None:
+            raise last_err
 
         downloaded = list(Path(tmp_dir).glob("*"))
         if not downloaded:
@@ -157,8 +196,15 @@ def download_url(
 
     except Exception as e:
         err = str(e)
-        if "Sign in" in err or "login" in err.lower():
-            result["error"] = "Content requires authentication (private/members-only). Try a public URL."
+        if "403" in err or "Forbidden" in err:
+            result["error"] = (
+                "YouTube returned a 403 Forbidden error. This usually means:\n"
+                "• The video is age-restricted or requires sign-in\n"
+                "• YouTube is rate-limiting this IP (try again in a few minutes)\n"
+                "• Try a different video, or use the **Upload File** option instead"
+            )
+        elif "Sign in" in err or "login" in err.lower():
+            result["error"] = "Content requires sign-in (private/members-only/age-restricted). Try a public URL."
         elif "Unsupported URL" in err:
             result["error"] = (
                 "URL not recognized. Supported: YouTube, SoundCloud, Vimeo, podcast feeds, "
