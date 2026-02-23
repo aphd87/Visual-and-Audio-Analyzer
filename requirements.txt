@@ -1,0 +1,26 @@
+streamlit
+pandas
+numpy
+plotly>=5.18.0
+anthropic
+
+# ── Core NLP (reused from script analyzer pipeline) ─────────────────────────
+spacy
+scikit-learn
+scipy
+
+# ── Audio transcription ──────────────────────────────────────────────────────
+openai-whisper
+soundfile
+librosa
+
+# ── Video processing ─────────────────────────────────────────────────────────
+opencv-python
+scenedetect[opencv]
+
+# ── File I/O ─────────────────────────────────────────────────────────────────
+Pillow
+yt-dlp
+
+# ── Optional: YouTube/URL download ──────────────────────────────────────────
+# yt-dlp is included above — enable in app settings if needed
