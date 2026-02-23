@@ -1,16 +1,12 @@
 from __future__ import annotations
 """
-pages_analysis.py — Deep analysis of transcribed visual content.
-
-Tabs within this page:
-  - Scene Structure
-  - Narrative Pacing
-  - Acoustic Intelligence
-  - Transcript NLP
+pages_analysis.py — Deep single-content analysis.
+Tabs: Scene Structure | Narrative Pacing | Acoustic Intelligence | Transcript NLP
 """
 
 import re
-from typing import Dict, List, Any, Optional
+from collections import Counter
+from typing import Dict, Any
 
 import pandas as pd
 import numpy as np
@@ -22,21 +18,24 @@ from constants import COLOR_PALETTE, HAS_ANTHROPIC
 
 
 def page_analysis():
-    st.subheader("📊 Content Analysis")
-    st.caption("Deep analysis of transcribed and visual content. Upload a video first in the Ingest tab.")
+    st.subheader("📊 Analysis")
+    st.caption("Deep analysis of transcribed content. Ingest a video or podcast first.")
 
     bundle = st.session_state.get("current_visual_bundle")
     if bundle is None:
-        st.info("📤 No content loaded yet. Go to **Ingest** and upload a video or paste a transcript.")
+        st.info("📤 Nothing loaded yet. Go to **Ingest** first.")
         return
 
-    metadata = st.session_state.get("current_visual_metadata", {})
+    meta = st.session_state.get("current_visual_metadata", {})
     scene_df = bundle.get("scene_df", pd.DataFrame())
     acoustic_df = bundle.get("acoustic_df", pd.DataFrame())
     transcript = st.session_state.get("current_transcript", "")
 
-    title = metadata.get("title", "Untitled")
-    st.markdown(f"**Analyzing:** {title} | {metadata.get('type', '')} | {metadata.get('genre', '')} | {metadata.get('year', '')}")
+    st.markdown(
+        f"**{meta.get('title', 'Untitled')}** | {meta.get('type', '')} | "
+        f"{meta.get('genre', '')} | {meta.get('year', '')} | "
+        f"Source: {meta.get('source', '').capitalize()}"
+    )
     st.divider()
 
     tab_scene, tab_pacing, tab_acoustic, tab_nlp = st.tabs([
@@ -47,288 +46,280 @@ def page_analysis():
     ])
 
     # ════════════════════════════════════════════════════════════════════════
-    # TAB 1: SCENE STRUCTURE
+    # TAB 1 — SCENE STRUCTURE
     # ════════════════════════════════════════════════════════════════════════
     with tab_scene:
-        st.markdown("### Scene Overview")
-
         if scene_df.empty:
             st.info("No scene data available.")
         else:
             sm = bundle.get("summary", {})
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Scenes", sm.get("scenes", 0))
-            c2.metric("Total Words", f"{sm.get('dialogue_words', 0):,}")
             duration = sm.get("duration_seconds", 0)
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Scenes", sm.get("scenes", 0))
+            c2.metric("Total Words", f"{sm.get('dialogue_words', 0):,}")
             c3.metric("Duration", f"{int(duration//60)}m {int(duration%60)}s" if duration else "—")
-            avg_words = scene_df["dialogue_words"].mean() if "dialogue_words" in scene_df.columns else 0
-            c4.metric("Avg Words/Scene", f"{avg_words:.0f}")
+            avg = scene_df["dialogue_words"].mean() if "dialogue_words" in scene_df.columns else 0
+            c4.metric("Avg Words/Scene", f"{avg:.0f}")
 
             st.divider()
 
-            # Scene length distribution
-            st.markdown("#### Scene Length Distribution")
             if "dialogue_words" in scene_df.columns:
-                fig_hist = px.histogram(
-                    scene_df,
-                    x="dialogue_words",
-                    nbins=20,
-                    title="Distribution of Scene Lengths (Words)",
+                fig = px.histogram(
+                    scene_df, x="dialogue_words", nbins=20,
+                    title="Scene Length Distribution",
                     color_discrete_sequence=[COLOR_PALETTE["primary"]],
                 )
-                fig_hist.update_layout(height=350, xaxis_title="Dialogue Words", yaxis_title="Scenes")
-                st.plotly_chart(fig_hist, use_container_width=True)
-                st.caption("Shorter scenes = faster pacing. Longer scenes = dialogue-heavy or exposition-heavy sequences.")
+                fig.update_layout(height=320, xaxis_title="Words per Scene", yaxis_title="Count")
+                st.plotly_chart(fig, use_container_width=True)
 
             # Scene table
-            st.markdown("#### Scene Table")
-            display_cols = [c for c in ["scene_id", "start_time", "end_time", "duration_seconds", "dialogue_words"]
-                            if c in scene_df.columns]
-            if display_cols:
-                st.dataframe(
-                    scene_df[display_cols].rename(columns={
-                        "scene_id": "Scene",
-                        "start_time": "Start (s)",
-                        "end_time": "End (s)",
-                        "duration_seconds": "Duration (s)",
-                        "dialogue_words": "Words",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            display_cols = [c for c in ["scene_id", "start_time", "end_time", "duration_seconds", "dialogue_words"] if c in scene_df.columns]
+            st.dataframe(
+                scene_df[display_cols].rename(columns={
+                    "scene_id": "Scene", "start_time": "Start (s)", "end_time": "End (s)",
+                    "duration_seconds": "Duration (s)", "dialogue_words": "Words",
+                }),
+                use_container_width=True, hide_index=True,
+            )
 
-            # Act structure estimation
+            # Act structure
+            n = len(scene_df)
             st.markdown("#### Estimated Act Structure")
-            n_scenes = len(scene_df)
-            act1_end = int(n_scenes * 0.25)
-            act2_end = int(n_scenes * 0.75)
-
             act_df = pd.DataFrame([
-                {"Act": "Act 1 (Setup)", "Scenes": f"1–{act1_end}", "Pct": "0–25%"},
-                {"Act": "Act 2 (Confrontation)", "Scenes": f"{act1_end+1}–{act2_end}", "Pct": "25–75%"},
-                {"Act": "Act 3 (Resolution)", "Scenes": f"{act2_end+1}–{n_scenes}", "Pct": "75–100%"},
+                {"Act": "Act 1 — Setup",         "Scenes": f"1–{int(n*0.25)}",           "Position": "0–25%"},
+                {"Act": "Act 2 — Confrontation", "Scenes": f"{int(n*0.25)+1}–{int(n*0.75)}", "Position": "25–75%"},
+                {"Act": "Act 3 — Resolution",    "Scenes": f"{int(n*0.75)+1}–{n}",       "Position": "75–100%"},
             ])
             st.dataframe(act_df, use_container_width=True, hide_index=True)
-            st.caption("Based on Syd Field's three-act model. Scene boundaries estimated from video cut detection.")
+            st.caption("Based on Syd Field's three-act model. Scene boundaries estimated from audio cut detection.")
 
     # ════════════════════════════════════════════════════════════════════════
-    # TAB 2: NARRATIVE PACING
+    # TAB 2 — NARRATIVE PACING
     # ════════════════════════════════════════════════════════════════════════
     with tab_pacing:
-        st.markdown("### Narrative Pacing")
-
         if scene_df.empty or "dialogue_words" not in scene_df.columns:
             st.info("No pacing data available.")
         else:
-            # Rolling average pacing
-            scene_df_copy = scene_df.copy()
-            scene_df_copy["rolling_avg"] = scene_df_copy["dialogue_words"].rolling(window=5, min_periods=1).mean()
+            df = scene_df.copy()
+            df["rolling_avg"] = df["dialogue_words"].rolling(window=5, min_periods=1).mean()
+            n = len(df)
 
-            fig_pacing = go.Figure()
-            fig_pacing.add_trace(go.Bar(
-                x=scene_df_copy["scene_id"],
-                y=scene_df_copy["dialogue_words"],
-                name="Words per Scene",
-                marker_color=COLOR_PALETTE["neutral"],
-                opacity=0.6,
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=df["scene_id"], y=df["dialogue_words"],
+                name="Words/Scene", marker_color=COLOR_PALETTE["neutral"], opacity=0.6,
             ))
-            fig_pacing.add_trace(go.Scatter(
-                x=scene_df_copy["scene_id"],
-                y=scene_df_copy["rolling_avg"],
-                name="5-Scene Rolling Average",
-                line=dict(color=COLOR_PALETTE["primary"], width=2.5),
+            fig.add_trace(go.Scatter(
+                x=df["scene_id"], y=df["rolling_avg"],
+                name="5-Scene Avg", line=dict(color=COLOR_PALETTE["primary"], width=2.5),
             ))
-
-            # Mark act boundaries
-            n = len(scene_df_copy)
             for pct, label in [(0.25, "Act 2"), (0.75, "Act 3")]:
-                scene_mark = int(n * pct)
-                fig_pacing.add_vline(
-                    x=scene_mark,
-                    line_dash="dash",
-                    line_color=COLOR_PALETTE["accent"],
-                    annotation_text=label,
-                    annotation_position="top",
-                )
-
-            fig_pacing.update_layout(
-                title="Narrative Pacing — Words per Scene with Rolling Average",
-                height=400,
-                xaxis_title="Scene Number",
-                yaxis_title="Dialogue Words",
+                fig.add_vline(x=int(n * pct), line_dash="dash",
+                              line_color=COLOR_PALETTE["accent"],
+                              annotation_text=label, annotation_position="top")
+            fig.update_layout(
+                title="Narrative Pacing",
+                height=400, xaxis_title="Scene", yaxis_title="Dialogue Words",
                 legend=dict(orientation="h", y=1.08),
             )
-            st.plotly_chart(fig_pacing, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
 
-            # Pacing insights
-            st.markdown("#### Pacing Insights")
-            total = len(scene_df_copy)
-            act1 = scene_df_copy.iloc[:int(total*0.25)]
-            act2 = scene_df_copy.iloc[int(total*0.25):int(total*0.75)]
-            act3 = scene_df_copy.iloc[int(total*0.75):]
+            a1 = df.iloc[:int(n*0.25)]["dialogue_words"].mean()
+            a2 = df.iloc[int(n*0.25):int(n*0.75)]["dialogue_words"].mean()
+            a3 = df.iloc[int(n*0.75):]["dialogue_words"].mean()
 
-            a1_avg = act1["dialogue_words"].mean() if not act1.empty else 0
-            a2_avg = act2["dialogue_words"].mean() if not act2.empty else 0
-            a3_avg = act3["dialogue_words"].mean() if not act3.empty else 0
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Act 1 Avg Words", f"{a1:.0f}")
+            c2.metric("Act 2 Avg Words", f"{a2:.0f}")
+            c3.metric("Act 3 Avg Words", f"{a3:.0f}")
 
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Act 1 Avg Words/Scene", f"{a1_avg:.0f}")
-            col2.metric("Act 2 Avg Words/Scene", f"{a2_avg:.0f}")
-            col3.metric("Act 3 Avg Words/Scene", f"{a3_avg:.0f}")
-
-            if a3_avg < a2_avg * 0.8:
-                st.success("✅ **Accelerating finale** — Act 3 has shorter, faster scenes. Strong structural pacing.")
-            elif a3_avg > a2_avg * 1.2:
-                st.warning("⚠️ **Slowing finale** — Act 3 is more dialogue-heavy than Act 2. Consider tightening the ending.")
+            if a3 < a2 * 0.8:
+                st.success("✅ **Accelerating finale** — Act 3 pacing tightens. Strong structural rhythm.")
+            elif a3 > a2 * 1.2:
+                st.warning("⚠️ **Slowing finale** — Act 3 is heavier than Act 2. Consider tightening.")
             else:
-                st.info("ℹ️ **Consistent pacing** across acts.")
+                st.info("ℹ️ **Consistent pacing** across all three acts.")
 
-            # Peak/trough moments
-            st.markdown("#### Notable Pacing Moments")
-            if len(scene_df_copy) > 5:
-                peak_scene = scene_df_copy.loc[scene_df_copy["dialogue_words"].idxmax()]
-                trough_scene = scene_df_copy.loc[scene_df_copy["dialogue_words"].idxmin()]
-                col_p, col_t = st.columns(2)
-                col_p.info(f"🔺 **Most dialogue-heavy**: Scene {int(peak_scene['scene_id'])} ({int(peak_scene['dialogue_words'])} words)")
-                col_t.info(f"🔻 **Sparsest scene**: Scene {int(trough_scene['scene_id'])} ({int(trough_scene['dialogue_words'])} words)")
+            if len(df) > 5:
+                peak = df.loc[df["dialogue_words"].idxmax()]
+                trough = df.loc[df["dialogue_words"].idxmin()]
+                cp, ct = st.columns(2)
+                cp.info(f"🔺 **Peak**: Scene {int(peak['scene_id'])} — {int(peak['dialogue_words'])} words")
+                ct.info(f"🔻 **Sparsest**: Scene {int(trough['scene_id'])} — {int(trough['dialogue_words'])} words")
 
     # ════════════════════════════════════════════════════════════════════════
-    # TAB 3: ACOUSTIC INTELLIGENCE
+    # TAB 3 — ACOUSTIC INTELLIGENCE
     # ════════════════════════════════════════════════════════════════════════
     with tab_acoustic:
-        st.markdown("### Acoustic Intelligence")
-
         if acoustic_df.empty:
-            st.info("Acoustic data not available. Re-analyze with a video file and Librosa installed.")
+            st.info("Acoustic data not available. Re-ingest with a video or audio file (requires Librosa).")
         else:
             c1, c2, c3 = st.columns(3)
             c1.metric("Avg Energy (RMS)", f"{acoustic_df['rms_energy'].mean():.4f}")
-            if "tempo_bpm" in acoustic_df.columns:
-                valid_tempo = acoustic_df[acoustic_df["tempo_bpm"] > 0]["tempo_bpm"]
-                c2.metric("Avg Tempo", f"{valid_tempo.mean():.0f} BPM" if not valid_tempo.empty else "—")
-            if "pitch_mean" in acoustic_df.columns:
-                valid_pitch = acoustic_df[acoustic_df["pitch_mean"] > 0]["pitch_mean"]
-                c3.metric("Avg Pitch", f"{valid_pitch.mean():.0f} Hz" if not valid_pitch.empty else "—")
+            valid_tempo = acoustic_df[acoustic_df["tempo_bpm"] > 0]["tempo_bpm"] if "tempo_bpm" in acoustic_df.columns else pd.Series()
+            c2.metric("Avg Tempo", f"{valid_tempo.mean():.0f} BPM" if not valid_tempo.empty else "—")
+            valid_pitch = acoustic_df[acoustic_df["pitch_mean"] > 0]["pitch_mean"] if "pitch_mean" in acoustic_df.columns else pd.Series()
+            c3.metric("Avg Pitch", f"{valid_pitch.mean():.0f} Hz" if not valid_pitch.empty else "—")
 
             st.divider()
 
-            # Energy over time
             fig_e = px.area(
-                acoustic_df,
-                x="scene_id",
-                y="rms_energy",
-                title="Audio Energy Profile (RMS per Scene)",
+                acoustic_df, x="scene_id", y="rms_energy",
+                title="Audio Energy Profile",
                 color_discrete_sequence=[COLOR_PALETTE["primary"]],
             )
-            fig_e.update_layout(height=320, xaxis_title="Scene", yaxis_title="RMS Energy")
+            fig_e.update_layout(height=300, xaxis_title="Scene", yaxis_title="RMS Energy")
             st.plotly_chart(fig_e, use_container_width=True)
-            st.caption("High energy peaks often correspond to action, confrontation, or climactic moments.")
+            st.caption("Energy peaks often correspond to high-intensity moments, confrontations, or music cues.")
 
-            # Combine acoustic + pacing if both available
+            if "tempo_bpm" in acoustic_df.columns and acoustic_df["tempo_bpm"].sum() > 0:
+                fig_t = px.bar(
+                    acoustic_df, x="scene_id", y="tempo_bpm",
+                    title="Estimated Tempo per Scene (BPM)",
+                    color_discrete_sequence=[COLOR_PALETTE["accent"]],
+                )
+                fig_t.update_layout(height=280, xaxis_title="Scene", yaxis_title="BPM")
+                st.plotly_chart(fig_t, use_container_width=True)
+
+            # Correlation with pacing
             if not scene_df.empty and "dialogue_words" in scene_df.columns:
-                st.markdown("#### Acoustic vs. Dialogue Correlation")
                 merged = pd.merge(
                     scene_df[["scene_id", "dialogue_words"]],
                     acoustic_df[["scene_id", "rms_energy"]],
-                    on="scene_id",
-                    how="inner",
+                    on="scene_id", how="inner",
                 )
                 if not merged.empty:
-                    fig_corr = px.scatter(
-                        merged,
-                        x="dialogue_words",
-                        y="rms_energy",
-                        title="Dialogue Volume vs Audio Energy",
+                    corr = merged["dialogue_words"].corr(merged["rms_energy"])
+                    fig_c = px.scatter(
+                        merged, x="dialogue_words", y="rms_energy",
+                        title=f"Dialogue vs Energy (r = {corr:.2f})",
                         trendline="ols",
                         color_discrete_sequence=[COLOR_PALETTE["primary"]],
                     )
-                    fig_corr.update_layout(height=350, xaxis_title="Dialogue Words", yaxis_title="RMS Energy")
-                    st.plotly_chart(fig_corr, use_container_width=True)
-                    st.caption("Positive correlation: louder/more energetic scenes tend to have more dialogue. "
-                               "Negative correlation: action/music-driven scenes have high energy but sparse dialogue.")
+                    fig_c.update_layout(height=320, xaxis_title="Dialogue Words", yaxis_title="RMS Energy")
+                    st.plotly_chart(fig_c, use_container_width=True)
+                    if corr > 0.4:
+                        st.info("Positive correlation — louder scenes carry more dialogue.")
+                    elif corr < -0.4:
+                        st.info("Negative correlation — high-energy scenes are action/music-driven with sparse dialogue.")
+                    else:
+                        st.info("Weak correlation — audio energy and dialogue are relatively independent.")
 
     # ════════════════════════════════════════════════════════════════════════
-    # TAB 4: TRANSCRIPT NLP
+    # TAB 4 — TRANSCRIPT NLP
     # ════════════════════════════════════════════════════════════════════════
     with tab_nlp:
-        st.markdown("### Transcript NLP")
-
         if not transcript:
             st.info("No transcript available.")
         else:
+            stop_words = {
+                "the","a","an","and","or","but","in","on","at","to","for","of","with",
+                "is","it","this","that","was","are","be","have","i","you","he","she",
+                "we","they","do","not","so","if","as","my","your","his","her","our",
+                "its","me","him","us","them","just","like","know","think","get","going",
+                "yeah","right","okay","well","um","uh","actually","really",
+            }
+
             words = transcript.split()
             word_count = len(words)
-            unique_words = len(set(w.lower().strip(".,!?\"'") for w in words))
+            unique = len(set(w.lower().strip(".,!?\"'") for w in words))
             sentences = [s.strip() for s in re.split(r'[.!?]', transcript) if s.strip()]
-            avg_sentence_len = word_count / len(sentences) if sentences else 0
+            avg_sent = word_count / len(sentences) if sentences else 0
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Total Words", f"{word_count:,}")
-            c2.metric("Unique Words", f"{unique_words:,}")
-            c3.metric("Lexical Diversity", f"{unique_words/word_count*100:.1f}%" if word_count > 0 else "—")
-            c4.metric("Avg Sentence Length", f"{avg_sentence_len:.1f} words")
+            c2.metric("Unique Words", f"{unique:,}")
+            c3.metric("Lexical Diversity", f"{unique/word_count*100:.1f}%" if word_count > 0 else "—")
+            c4.metric("Avg Sentence", f"{avg_sent:.1f} words")
 
             st.divider()
 
-            # Word frequency
-            st.markdown("#### Most Frequent Words")
-            from collections import Counter
-            stop_words = {"the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-                          "of", "with", "is", "it", "this", "that", "was", "are", "be", "have",
-                          "i", "you", "he", "she", "we", "they", "do", "not", "so", "if", "as",
-                          "my", "your", "his", "her", "our", "its", "me", "him", "us", "them"}
+            # Word frequency chart
             word_freq = Counter(
                 w.lower().strip(".,!?\"'") for w in words
-                if w.lower().strip(".,!?\"'") not in stop_words
-                and len(w.strip(".,!?\"'")) > 2
+                if w.lower().strip(".,!?\"'") not in stop_words and len(w.strip(".,!?\"'")) > 2
             )
             top_words = pd.DataFrame(word_freq.most_common(20), columns=["Word", "Count"])
 
             if not top_words.empty:
-                fig_words = px.bar(
-                    top_words,
-                    x="Count",
-                    y="Word",
-                    orientation="h",
-                    title="Top 20 Words (excluding stopwords)",
+                fig_w = px.bar(
+                    top_words, x="Count", y="Word", orientation="h",
+                    title="Top 20 Words (stopwords removed)",
                     color="Count",
                     color_continuous_scale=["#d3d3d3", "#87ceeb", "#1e90ff"],
                 )
-                fig_words.update_layout(height=500, yaxis={"categoryorder": "total ascending"})
-                st.plotly_chart(fig_words, use_container_width=True)
+                fig_w.update_layout(height=500, yaxis={"categoryorder": "total ascending"}, showlegend=False)
+                st.plotly_chart(fig_w, use_container_width=True)
 
-            # Claude AI summary (if available)
+            st.divider()
+
+            # Topic extraction (simple keyword clustering)
+            st.markdown("#### Topic Signals")
+            topic_seeds = {
+                "Conflict / Drama":     ["fight","argue","conflict","problem","crisis","angry","tension","wrong","blame","threat"],
+                "Emotion / Feeling":    ["feel","love","fear","hope","sad","happy","hurt","worried","care","trust"],
+                "Money / Business":     ["money","deal","cost","pay","profit","market","budget","revenue","invest","price"],
+                "Technology":           ["technology","data","system","digital","app","software","algorithm","ai","machine","code"],
+                "Family / Relationship":["family","mother","father","sister","brother","marriage","relationship","child","home","together"],
+                "Power / Politics":     ["power","control","government","leader","vote","decision","authority","policy","law","force"],
+            }
+            lower_transcript = transcript.lower()
+            topic_scores = {}
+            for topic, keywords in topic_seeds.items():
+                score = sum(lower_transcript.count(kw) for kw in keywords)
+                if score > 0:
+                    topic_scores[topic] = score
+
+            if topic_scores:
+                topic_df = pd.DataFrame(
+                    sorted(topic_scores.items(), key=lambda x: x[1], reverse=True),
+                    columns=["Topic", "Signal Strength"],
+                )
+                fig_t = px.bar(
+                    topic_df, x="Signal Strength", y="Topic", orientation="h",
+                    title="Topic Signal Strength",
+                    color="Signal Strength",
+                    color_continuous_scale=["#d3d3d3", "#87ceeb", "#1e90ff"],
+                )
+                fig_t.update_layout(height=350, yaxis={"categoryorder": "total ascending"}, showlegend=False)
+                st.plotly_chart(fig_t, use_container_width=True)
+                st.caption("Signal strength = keyword frequency. Indicates dominant themes — not a substitute for semantic NLP.")
+
+            st.divider()
+
+            # Transcript download
+            with st.expander("📝 Full Transcript", expanded=False):
+                st.text_area("", value=transcript, height=350, disabled=True, key="va_tx_view")
+                st.download_button(
+                    "⬇️ Download Transcript (.txt)",
+                    data=transcript.encode("utf-8"),
+                    file_name=f"{st.session_state.get('current_visual_metadata', {}).get('title', 'transcript')}.txt",
+                    mime="text/plain",
+                )
+
+            # AI Summary
             if HAS_ANTHROPIC:
                 st.divider()
                 st.markdown("#### 🤖 AI Narrative Summary")
-                st.caption("Uses Claude to generate a narrative intelligence report from the transcript.")
-
-                if st.button("Generate AI Summary", key="va_ai_summary_btn"):
-                    with st.spinner("Generating narrative summary with Claude..."):
+                if st.button("Generate Summary", key="va_ai_btn"):
+                    with st.spinner("Generating with Claude..."):
                         try:
                             from anthropic import Anthropic
                             client = Anthropic()
-                            excerpt = transcript[:4000]
+                            meta = st.session_state.get("current_visual_metadata", {})
                             response = client.messages.create(
                                 model="claude-sonnet-4-20250514",
                                 max_tokens=800,
-                                messages=[{
-                                    "role": "user",
-                                    "content": (
-                                        f"You are a media analyst. Analyze this transcript excerpt from a "
-                                        f"{metadata.get('type', 'production')} titled '{metadata.get('title', 'Unknown')}'.\n\n"
-                                        f"Provide:\n"
-                                        f"1. Narrative summary (2-3 sentences)\n"
-                                        f"2. Tone and emotional register\n"
-                                        f"3. Key themes\n"
-                                        f"4. Notable narrative observations\n\n"
-                                        f"Transcript excerpt:\n{excerpt}"
-                                    )
-                                }]
+                                messages=[{"role": "user", "content": (
+                                    f"Analyze this transcript from a {meta.get('type','production')} "
+                                    f"titled '{meta.get('title','Unknown')}'.\n\n"
+                                    f"Provide:\n1. Narrative summary (2-3 sentences)\n"
+                                    f"2. Tone and emotional register\n3. Key themes\n"
+                                    f"4. Notable observations\n\nTranscript:\n{transcript[:4000]}"
+                                )}]
                             )
-                            summary_text = response.content[0].text
-                            st.markdown(summary_text)
+                            st.markdown(response.content[0].text)
                         except Exception as e:
-                            st.error(f"AI summary error: {e}")
+                            st.error(f"AI error: {e}")
             else:
-                st.info("💡 Add an Anthropic API key in Streamlit secrets to enable AI narrative summaries.")
+                st.info("💡 Add ANTHROPIC_API_KEY to Streamlit secrets to enable AI summaries.")
