@@ -125,18 +125,13 @@ def download_url(
         "no_warnings": True,
     }
 
-    if is_audio:
-        ydl_opts.update({
-            "format": "bestaudio/best",
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }],
-        })
-        result["is_audio_only"] = True
-    else:
-        ydl_opts["format"] = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+    # Always request audio-only — Whisper only needs audio, and this avoids
+    # ffmpeg merge requirements entirely. Format priority:
+    #   1. best single-file format that contains audio (mp4, webm, m4a, etc.)
+    #   2. best audio-only stream
+    # No postprocessors = no ffmpeg dependency.
+    ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[ext=webm]/bestaudio/best[acodec!=none]/best"
+    result["is_audio_only"] = True
 
     try:
         if progress_callback:
