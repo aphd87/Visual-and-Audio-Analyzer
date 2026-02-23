@@ -13,7 +13,7 @@ import streamlit as st
 
 from constants import COLOR_PALETTE, HAS_WHISPER, HAS_CV2, HAS_SCENEDETECT, HAS_LIBROSA, HAS_YTDLP
 from ingestion import (
-    download_url, get_url_preview, ingest_video, transcribe_audio,
+    ingest_url, get_url_preview, ingest_video, transcribe_audio,
     segments_to_scene_df, transcript_to_script_text, analyze_acoustics,
     build_visual_bundle, keyframe_to_png_bytes, content_hash,
 )
@@ -70,44 +70,72 @@ def _whisper_options() -> tuple:
     return model, lang.strip() if lang.strip() else None
 
 
-def _run_pipeline(file_path: str, metadata: Dict, whisper_model: str, language: Optional[str], is_audio: bool):
-    """Run the full ingestion pipeline on a local file and save to session state."""
+def _run_pipeline(
+    metadata: Dict,
+    whisper_model: str,
+    language: Optional[str],
+    is_audio: bool,
+    file_path: Optional[str] = None,
+    pre_segments: Optional[list] = None,
+    pre_transcript: Optional[str] = None,
+):
+    """
+    Run the full ingestion pipeline and save to session state.
 
-    # Step 1: Video/scene ingestion (skip for audio-only)
-    video_info = {"scene_cuts": [], "keyframes": [], "keyframe_times": [], "fps": 0, "duration_seconds": 0, "total_frames": 0}
-    if not is_audio and HAS_CV2:
+    Two modes:
+      - file_path provided  → scene detect + Whisper transcription
+      - pre_segments provided → captions already fetched (YouTube API path), skip Whisper
+    """
+    video_info = {"scene_cuts": [], "keyframes": [], "keyframe_times": [],
+                  "fps": 0, "duration_seconds": metadata.get("duration_raw", 0), "total_frames": 0}
+
+    # ── Video scene detection (only for uploaded files, not caption path) ──
+    if file_path and not is_audio and HAS_CV2:
         with st.spinner("🎬 Detecting scenes and extracting keyframes..."):
-            video_info = ingest_video(file_path)
-            if video_info.get("error"):
-                st.warning(f"Scene detection issue: {video_info['error']} — continuing with interval sampling.")
-                video_info["scene_cuts"] = []
-        n_cuts = len(video_info["scene_cuts"])
-        duration = video_info["duration_seconds"]
-        st.success(f"✅ Video: {duration:.0f}s — {n_cuts} scene cuts — {len(video_info['keyframes'])} keyframes")
+            vi = ingest_video(file_path)
+            if vi.get("error"):
+                st.warning(f"Scene detection skipped: {vi['error']}")
+            else:
+                video_info = vi
+        st.success(f"✅ Video: {video_info['duration_seconds']:.0f}s — "
+                   f"{len(video_info['scene_cuts'])} scene cuts — "
+                   f"{len(video_info['keyframes'])} keyframes")
 
-    # Step 2: Transcription
-    with st.spinner(f"🎙️ Transcribing with Whisper ({whisper_model})..."):
-        tx = transcribe_audio(file_path, model_size=whisper_model, language=language)
-        if tx.get("error"):
-            st.error(f"Transcription failed: {tx['error']}")
+    # ── Transcription ──────────────────────────────────────────────────────
+    if pre_segments is not None:
+        # Caption path — already have segments, skip Whisper
+        segments = pre_segments
+        raw_transcript = pre_transcript or " ".join(s["text"] for s in segments)
+        word_count = len(raw_transcript.split())
+        st.success(f"✅ Captions: {word_count:,} words — {len(segments)} segments — no Whisper needed")
+    else:
+        # File path — run Whisper
+        if not file_path:
+            st.error("No file path provided for transcription.")
             return
+        with st.spinner(f"🎙️ Transcribing with Whisper ({whisper_model})..."):
+            tx = transcribe_audio(file_path, model_size=whisper_model, language=language)
+            if tx.get("error"):
+                st.error(f"Transcription failed: {tx['error']}")
+                return
+        segments = tx["segments"]
+        raw_transcript = tx["text"]
+        word_count = len(raw_transcript.split())
+        st.success(f"✅ Transcription: {word_count:,} words — {len(segments)} segments — language: {tx.get('language','?')}")
 
-    word_count = len(tx["text"].split())
-    st.success(f"✅ Transcription: {word_count:,} words — {len(tx['segments'])} segments — language: {tx['language']}")
+    # ── Scene df ───────────────────────────────────────────────────────────
+    scene_df = segments_to_scene_df(segments, video_info["scene_cuts"])
 
-    # Step 3: Scene df
-    scene_df = segments_to_scene_df(tx["segments"], video_info["scene_cuts"])
-
-    # Step 4: Acoustics
+    # ── Acoustics (only if we have a local file) ───────────────────────────
     acoustic_df = pd.DataFrame()
-    if HAS_LIBROSA:
+    if file_path and HAS_LIBROSA:
         with st.spinner("🎵 Analyzing acoustics..."):
             acoustic_df = analyze_acoustics(file_path, video_info["scene_cuts"])
         if not acoustic_df.empty:
             st.success(f"✅ Acoustics: {len(acoustic_df)} segments analyzed")
 
-    # Step 5: Build bundle
-    transcript_text = transcript_to_script_text(tx["segments"], video_info["scene_cuts"])
+    # ── Build bundle ───────────────────────────────────────────────────────
+    transcript_text = transcript_to_script_text(segments, video_info["scene_cuts"])
     bundle = build_visual_bundle(
         scene_df=scene_df,
         acoustic_df=acoustic_df,
@@ -116,14 +144,13 @@ def _run_pipeline(file_path: str, metadata: Dict, whisper_model: str, language: 
         metadata=metadata,
     )
 
-    # Persist
-    st.session_state["current_visual_bundle"] = bundle
-    st.session_state["current_visual_metadata"] = metadata
-    st.session_state["current_transcript"] = tx["text"]
-    st.session_state["current_keyframes"] = video_info.get("keyframes", [])
-    st.session_state["current_keyframe_times"] = video_info.get("keyframe_times", [])
+    st.session_state["current_visual_bundle"]    = bundle
+    st.session_state["current_visual_metadata"]  = metadata
+    st.session_state["current_transcript"]       = raw_transcript
+    st.session_state["current_keyframes"]        = video_info.get("keyframes", [])
+    st.session_state["current_keyframe_times"]   = video_info.get("keyframe_times", [])
 
-    st.success(f"🎉 Analysis complete — **{metadata.get('title') or 'Content'}** ready. Go to the **Analysis** tab.")
+    st.success(f"🎉 Ready — **{metadata.get('title') or 'Content'}** loaded. Go to the **Analysis** tab.")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -179,51 +206,67 @@ def page_ingest():
         st.markdown("### ⚙️ Transcription Settings")
         whisper_model, language = _whisper_options()
 
-        if st.button("⬇️ Download & Analyze", type="primary", key="va_url_btn", disabled=not HAS_YTDLP):
+        if st.button("⬇️ Download & Analyze", type="primary", key="va_url_btn"):
             if not url or not url.startswith("http"):
                 st.warning("Please enter a valid URL.")
                 return
 
-            # Live progress display
             progress_placeholder = st.empty()
-
             def update_progress(msg: str):
                 progress_placeholder.info(msg)
 
-            # Download
-            dl = download_url(url, progress_callback=update_progress)
-            if dl.get("error"):
-                st.error(dl["error"])
-                return
-
+            result = ingest_url(url, language=language or "en",
+                                progress_callback=update_progress)
             progress_placeholder.empty()
 
-            # Fill metadata from URL info if user left title blank
+            if result.get("error"):
+                st.error(result["error"])
+                return
+
             metadata = dict(meta_base)
             if not metadata["title"]:
-                metadata["title"] = dl.get("title", "Untitled")
-            metadata["source"] = "url"
-            metadata["url"] = url
-            metadata["uploader"] = dl.get("uploader", "")
+                metadata["title"] = result.get("title", "Untitled")
+            metadata["source"]       = result.get("source", "url")
+            metadata["url"]          = url
+            metadata["uploader"]     = result.get("uploader", "")
+            metadata["duration_raw"] = result.get("duration", 0)
 
-            try:
-                _run_pipeline(
-                    file_path=dl["file_path"],
-                    metadata=metadata,
-                    whisper_model=whisper_model,
-                    language=language,
-                    is_audio=dl.get("is_audio_only", False),
-                )
-            finally:
-                # Clean up downloaded file
+            # Caption path — segments already available, skip Whisper
+            if result.get("segments"):
                 try:
-                    os.unlink(dl["file_path"])
-                    os.rmdir(os.path.dirname(dl["file_path"]))
+                    _run_pipeline(
+                        metadata=metadata,
+                        whisper_model=whisper_model,
+                        language=language,
+                        is_audio=True,
+                        file_path=None,
+                        pre_segments=result["segments"],
+                        pre_transcript=result.get("transcript_text", ""),
+                    )
                 except Exception:
-                    pass
+                    st.error(traceback.format_exc())
 
-        if not HAS_YTDLP:
-            st.error("yt-dlp is not installed. Add `yt-dlp` to requirements.txt and redeploy.")
+            # File download path — run Whisper on downloaded file
+            elif result.get("file_path"):
+                fp = result["file_path"]
+                try:
+                    _run_pipeline(
+                        metadata=metadata,
+                        whisper_model=whisper_model,
+                        language=language,
+                        is_audio=result.get("is_audio_only", True),
+                        file_path=fp,
+                    )
+                except Exception:
+                    st.error(traceback.format_exc())
+                finally:
+                    try:
+                        os.unlink(fp)
+                        os.rmdir(os.path.dirname(fp))
+                    except Exception:
+                        pass
+            else:
+                st.error("No content retrieved. Try a different URL or use Upload File.")
 
     # ════════════════════════════════════════════════════════════════════════
     # BRANCH B — FILE UPLOAD
@@ -257,11 +300,11 @@ def page_ingest():
 
                 try:
                     _run_pipeline(
-                        file_path=tmp_path,
                         metadata=metadata,
                         whisper_model=whisper_model,
                         language=language,
                         is_audio=is_audio,
+                        file_path=tmp_path,
                     )
                 finally:
                     try:

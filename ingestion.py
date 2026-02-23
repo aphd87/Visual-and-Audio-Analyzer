@@ -60,13 +60,25 @@ except ImportError:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 1. URL DOWNLOAD (yt-dlp)
+# 1. URL INGESTION — three-path strategy
+#
+#  Path A (YouTube URLs):
+#    1. YouTube captions API  — free, no IP ban, no download needed
+#    2. yt-dlp + proxy        — if user supplies YTDLP_PROXY in secrets
+#    3. Friendly error        — directing user to Upload File
+#
+#  Path B (non-YouTube URLs — podcasts, SoundCloud, etc.):
+#    1. yt-dlp direct download — works fine for non-YouTube sources
+#    2. yt-dlp + proxy         — if direct fails with 403
 # ════════════════════════════════════════════════════════════════════════════
 
 _DRM_DOMAINS = ["open.spotify.com/track", "open.spotify.com/album", "music.apple.com"]
 
 def is_drm_url(url: str) -> bool:
     return any(d in url for d in _DRM_DOMAINS)
+
+def is_youtube_url(url: str) -> bool:
+    return "youtube.com" in url or "youtu.be" in url
 
 def is_audio_only_url(url: str) -> bool:
     audio_indicators = [
@@ -76,61 +88,151 @@ def is_audio_only_url(url: str) -> bool:
     ]
     return any(ind in url.lower() for ind in audio_indicators)
 
+def _get_proxy() -> Optional[str]:
+    """Read optional proxy from Streamlit secrets or environment."""
+    try:
+        import streamlit as st
+        proxy = st.secrets.get("YTDLP_PROXY") or st.secrets.get("ytdlp_proxy")
+        if proxy:
+            return str(proxy).strip()
+    except Exception:
+        pass
+    return os.environ.get("YTDLP_PROXY", "").strip() or None
 
-def download_url(
+
+def ingest_url(
     url: str,
+    language: str = "en",
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Download audio/video from a URL using yt-dlp.
+    Universal URL ingestion — returns a result dict with either:
+      - file_path (for Whisper transcription), OR
+      - transcript_text + segments (from captions, no file needed)
 
-    Returns dict with: file_path, title, duration, uploader,
-                       is_audio_only, thumbnail_url, description, error
+    Keys: file_path, title, duration, uploader, thumbnail_url, description,
+          transcript_text, segments, language, is_audio_only, source, error
     """
     result = {
         "file_path": None, "title": "", "duration": 0.0, "uploader": "",
-        "is_audio_only": False, "thumbnail_url": "", "description": "", "error": None,
+        "is_audio_only": True, "thumbnail_url": "", "description": "",
+        "transcript_text": "", "segments": [], "language": language,
+        "source": "url", "error": None,
     }
-
-    if not HAS_YTDLP:
-        result["error"] = "yt-dlp not installed. Run: pip install yt-dlp"
-        return result
 
     if is_drm_url(url):
         result["error"] = (
-            "This URL is DRM-protected (Spotify music / Apple Music tracks cannot be downloaded). "
-            "For Spotify podcasts, try the episode URL. Most podcasts are also on YouTube or SoundCloud."
+            "DRM-protected URL (Spotify music / Apple Music cannot be downloaded). "
+            "For Spotify podcasts, use the episode URL. Most podcasts are also on YouTube."
         )
+        return result
+
+    # ── PATH A: YouTube → captions first ────────────────────────────────────
+    if is_youtube_url(url):
+        from youtube_api import fetch_youtube_content
+        if progress_callback:
+            progress_callback("🎬 YouTube URL detected — fetching captions...")
+
+        yt_result = fetch_youtube_content(url, lang=language,
+                                           progress_callback=progress_callback)
+        if not yt_result.get("error"):
+            # Captions succeeded — merge into result, no file download needed
+            result.update({
+                "title":           yt_result.get("title", ""),
+                "duration":        yt_result.get("duration", 0),
+                "uploader":        yt_result.get("uploader", ""),
+                "thumbnail_url":   yt_result.get("thumbnail_url", ""),
+                "description":     yt_result.get("description", ""),
+                "transcript_text": yt_result.get("transcript_text", ""),
+                "segments":        yt_result.get("segments", []),
+                "language":        yt_result.get("language", language),
+                "source":          "youtube_captions",
+            })
+            return result
+
+        # Captions failed — try yt-dlp with proxy if available
+        cap_error = yt_result.get("error", "")
+        proxy = _get_proxy()
+        if HAS_YTDLP and proxy:
+            if progress_callback:
+                progress_callback(f"⚠️ Captions unavailable — trying yt-dlp via proxy...")
+            dl = _ytdlp_download(url, proxy=proxy, progress_callback=progress_callback)
+            if not dl.get("error"):
+                result.update(dl)
+                return result
+
+        # All paths failed — give clear actionable guidance
+        result["error"] = (
+            "**Could not retrieve this YouTube video.**\n\n"
+            f"Caption attempt: {cap_error}\n\n"
+            "**What to do:**\n"
+            "1. Download the video/audio locally (browser → Save As, or `yt-dlp` on your machine)\n"
+            "2. Come back and use **📁 Upload File** — this always works\n\n"
+            "Or: add a `YTDLP_PROXY` residential proxy URL to Streamlit secrets to enable server-side downloading."
+        )
+        return result
+
+    # ── PATH B: Non-YouTube (podcasts, SoundCloud, direct URLs) ─────────────
+    if not HAS_YTDLP:
+        result["error"] = "yt-dlp not installed. Add `yt-dlp` to requirements.txt."
+        return result
+
+    if progress_callback:
+        progress_callback("⬇️ Downloading audio...")
+
+    dl = _ytdlp_download(url, proxy=None, progress_callback=progress_callback)
+    if not dl.get("error"):
+        result.update(dl)
+        return result
+
+    # Retry with proxy if available
+    proxy = _get_proxy()
+    if proxy and ("403" in str(dl.get("error","")) or "Forbidden" in str(dl.get("error",""))):
+        if progress_callback:
+            progress_callback("⚠️ Direct download blocked — retrying via proxy...")
+        dl2 = _ytdlp_download(url, proxy=proxy, progress_callback=progress_callback)
+        if not dl2.get("error"):
+            result.update(dl2)
+            return result
+
+    result["error"] = dl.get("error", "Download failed.")
+    return result
+
+
+def _ytdlp_download(
+    url: str,
+    proxy: Optional[str] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """Internal yt-dlp download. Returns result dict."""
+    result = {"file_path": None, "title": "", "duration": 0.0,
+              "uploader": "", "is_audio_only": True,
+              "thumbnail_url": "", "description": "", "error": None}
+
+    if not HAS_YTDLP:
+        result["error"] = "yt-dlp not installed"
         return result
 
     tmp_dir = tempfile.mkdtemp()
     output_template = os.path.join(tmp_dir, "%(title)s.%(ext)s")
-    is_audio = is_audio_only_url(url)
 
     def _hook(d):
         if progress_callback is None:
             return
         if d.get("status") == "downloading":
-            pct = d.get("_percent_str", "").strip()
+            pct   = d.get("_percent_str", "").strip()
             speed = d.get("_speed_str", "").strip()
-            eta = d.get("_eta_str", "").strip()
-            progress_callback(f"⬇️ Downloading... {pct}  |  {speed}  |  ETA {eta}")
+            eta   = d.get("_eta_str", "").strip()
+            progress_callback(f"⬇️ {pct}  |  {speed}  |  ETA {eta}")
         elif d.get("status") == "finished":
-            progress_callback("✅ Download complete — processing file...")
+            progress_callback("✅ Download complete — processing...")
 
-    # Always request audio-only — Whisper only needs audio, and this avoids
-    # ffmpeg merge requirements entirely. Format priority:
-    #   1. best single-file format that contains audio (m4a → webm → best available)
-    # No postprocessors = no ffmpeg dependency.
-    _FORMAT = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[acodec!=none]/best"
-
-    BASE_OPTS = {
-        "outtmpl": output_template,
-        "progress_hooks": [_hook],
-        "quiet": True,
-        "no_warnings": True,
-        "format": _FORMAT,
-        # Mimic a real browser to avoid 403s
+    opts = {
+        "outtmpl":          output_template,
+        "progress_hooks":   [_hook],
+        "quiet":            True,
+        "no_warnings":      True,
+        "format":           "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[acodec!=none]/best",
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -139,31 +241,28 @@ def download_url(
             ),
             "Accept-Language": "en-US,en;q=0.9",
         },
-        "socket_timeout": 30,
-        "retries": 3,
-        "fragment_retries": 3,
+        "socket_timeout":   30,
+        "retries":          3,
     }
-
-    result["is_audio_only"] = True
+    if proxy:
+        opts["proxy"] = proxy
 
     try:
-        if progress_callback:
-            progress_callback("🔍 Fetching content info...")
-
-        with yt_dlp.YoutubeDL(BASE_OPTS) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
 
         downloaded = list(Path(tmp_dir).glob("*"))
         if not downloaded:
-            result["error"] = "Download completed but no file found. Try a different URL."
+            result["error"] = "Download finished but no file found."
             return result
 
-        result["file_path"] = str(downloaded[0])
-        result["title"] = info.get("title", "Unknown")
-        result["duration"] = float(info.get("duration") or 0)
-        result["uploader"] = info.get("uploader", info.get("channel", ""))
-        result["thumbnail_url"] = info.get("thumbnail", "")
-        result["description"] = (info.get("description") or "")[:500]
+        result["file_path"]    = str(downloaded[0])
+        result["title"]        = info.get("title", "Unknown")
+        result["duration"]     = float(info.get("duration") or 0)
+        result["uploader"]     = info.get("uploader", info.get("channel", ""))
+        result["thumbnail_url"]= info.get("thumbnail", "")
+        result["description"]  = (info.get("description") or "")[:500]
+        result["source"]       = "ytdlp_proxy" if proxy else "ytdlp"
 
         if progress_callback:
             progress_callback(f"✅ Ready: {result['title']} ({result['duration']/60:.1f} min)")
@@ -171,44 +270,52 @@ def download_url(
     except Exception as e:
         err = str(e)
         if "403" in err or "Forbidden" in err:
-            result["error"] = (
-                "YouTube returned a 403 Forbidden error. This usually means:\n"
-                "• The video is age-restricted or requires sign-in\n"
-                "• YouTube is rate-limiting this IP (try again in a few minutes)\n"
-                "• Try a different video, or use the **Upload File** option instead"
-            )
+            result["error"] = "403 Forbidden — server IP is blocked by this source."
         elif "Sign in" in err or "login" in err.lower():
-            result["error"] = "Content requires sign-in (private/members-only/age-restricted). Try a public URL."
+            result["error"] = "Sign-in required (private/age-restricted content)."
         elif "Unsupported URL" in err:
-            result["error"] = (
-                "URL not recognized. Supported: YouTube, SoundCloud, Vimeo, podcast feeds, "
-                "and 1000+ other sites. Direct Spotify music is not supported."
-            )
+            result["error"] = "URL not supported by yt-dlp."
         elif "not available" in err.lower():
-            result["error"] = "Content unavailable — may be region-locked or removed."
+            result["error"] = "Content unavailable or region-locked."
         else:
-            result["error"] = f"Download failed: {err[:300]}"
+            result["error"] = f"Download failed: {err[:200]}"
 
     return result
 
 
+# Keep download_url as an alias for backward compatibility
+def download_url(url, progress_callback=None):
+    return ingest_url(url, progress_callback=progress_callback)
+
+
 def get_url_preview(url: str) -> Dict[str, Any]:
-    """Fetch title/duration metadata without downloading — for preview."""
+    """Fetch title/duration metadata without downloading."""
+    if is_youtube_url(url):
+        try:
+            from youtube_api import get_api_key, get_video_metadata, extract_video_id
+            import urllib.request, json, urllib.parse
+            video_id = extract_video_id(url)
+            api_key = get_api_key()
+            if api_key and video_id:
+                return get_video_metadata(video_id, api_key)
+            # No API key — use oembed
+            oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(url)}&format=json"
+            with urllib.request.urlopen(oembed_url, timeout=8) as resp:
+                data = json.loads(resp.read())
+            return {"title": data.get("title",""), "uploader": data.get("author_name",""),
+                    "duration": 0, "thumbnail_url": data.get("thumbnail_url",""),
+                    "description": "", "error": None}
+        except Exception as e:
+            return {"error": str(e)[:100]}
     if not HAS_YTDLP:
         return {"error": "yt-dlp not installed"}
-    if is_drm_url(url):
-        return {"error": "DRM-protected URL — podcasts and video content only"}
     try:
         with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
             info = ydl.extract_info(url, download=False)
-        return {
-            "title": info.get("title", "Unknown"),
-            "duration": float(info.get("duration") or 0),
-            "uploader": info.get("uploader", info.get("channel", "")),
-            "thumbnail_url": info.get("thumbnail", ""),
-            "description": (info.get("description") or "")[:300],
-            "error": None,
-        }
+        return {"title": info.get("title",""), "duration": float(info.get("duration") or 0),
+                "uploader": info.get("uploader", info.get("channel","")),
+                "thumbnail_url": info.get("thumbnail",""),
+                "description": (info.get("description") or "")[:300], "error": None}
     except Exception as e:
         return {"error": str(e)[:200]}
 
