@@ -80,7 +80,7 @@ with st.sidebar:
 # HEADER & INTRO
 # ════════════════════════════════════════════════════════════════════════════
 
-st.title("🎥 TV & Film Visual Analyzer")
+st.title("🎥 Video and Audio Analyzer")
 st.markdown("### *Computational content intelligence for produced media*")
 
 st.markdown("""

@@ -4,7 +4,7 @@ import streamlit as st
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="TV & Film Visual Analyzer",
+    page_title="Video and Audio Analyzer",
     page_icon="🎥",
     layout="wide",
     initial_sidebar_state="expanded",

@@ -146,38 +146,12 @@ def download_url(
 
     result["is_audio_only"] = True
 
-    # Attempt order:
-    #  1. cookiesfrombrowser=chrome  (works when Chrome is installed + logged in)
-    #  2. cookiesfrombrowser=firefox
-    #  3. No cookies (works for most non-age-gated public content)
-    _attempts = [
-        {**BASE_OPTS, "cookiesfrombrowser": ("chrome",)},
-        {**BASE_OPTS, "cookiesfrombrowser": ("firefox",)},
-        BASE_OPTS,
-    ]
-
     try:
         if progress_callback:
             progress_callback("🔍 Fetching content info...")
 
-        info = None
-        last_err = None
-        for attempt_opts in _attempts:
-            try:
-                with yt_dlp.YoutubeDL(attempt_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                ydl_opts = attempt_opts  # keep reference for later
-                break
-            except yt_dlp.utils.DownloadError as e:
-                last_err = e
-                err_str = str(e)
-                # Only retry on 403/auth errors; bail immediately on others
-                if "403" in err_str or "Forbidden" in err_str or "Sign in" in err_str:
-                    continue
-                raise  # non-auth error — don't retry
-
-        if info is None:
-            raise last_err
+        with yt_dlp.YoutubeDL(BASE_OPTS) as ydl:
+            info = ydl.extract_info(url, download=True)
 
         downloaded = list(Path(tmp_dir).glob("*"))
         if not downloaded:
